@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ty-async"
+description = "Extremely fast ASYNC200 linter (flake8-async's user-configured blocking-call check), built on ruff's Python parser"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["lint", "async", "flake8-async", "ASYNC200"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Programming Language :: Python",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+bindings = "bin"
