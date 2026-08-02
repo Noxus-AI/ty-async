@@ -1,0 +1,13 @@
+[package]
+name = "ty-async"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rayon = "1.12.0"
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.16.1" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.16.1" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.16.1", version = "0.0.7" }
+
+[profile.release]
+lto = true
