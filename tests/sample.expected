@@ -1,0 +1,15 @@
+tests/sample.py:4:5: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:6:5: ASYNC200 User-configured blocking sync call ctx.storage.* in async function, consider replacing with ().
+tests/sample.py:7:9: ASYNC200 User-configured blocking sync call *.load_data in async function, consider replacing with ().
+tests/sample.py:8:9: ASYNC200 User-configured blocking sync call markdownify in async function, consider replacing with ().
+tests/sample.py:11:5: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:15:9: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:22:5: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:23:5: ASYNC200 User-configured blocking sync call *.load_data in async function, consider replacing with ().
+tests/sample.py:24:5: ASYNC200 User-configured blocking sync call ctx.storage.* in async function, consider replacing with ().
+tests/sample.py:24:5: ASYNC200 User-configured blocking sync call ctx.storage.* in async function, consider replacing with ().
+tests/sample.py:25:18: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:26:11: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:29:10: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/sample.py:31:21: ASYNC200 User-configured blocking sync call ctx.storage.* in async function, consider replacing with ().
+tests/sample.py:34:5: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().

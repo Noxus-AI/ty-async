@@ -1,21 +1,25 @@
-//! Fast ASYNC200 linter (flake8-async's user-configured blocking-call check),
-//! built on ruff's Python parser.
+//! Fast Python linter built on ruff's parser, implementing:
 //!
-//! Replicates flake8-async semantics: inside `async def` bodies (nested `def`
-//! and `lambda` reset the context), every call that is not directly awaited
-//! has `ast.unparse(node.func)` fnmatch-ed against the configured patterns.
+//! - flake8-async's ASYNC200 check (user-configured blocking calls in async
+//!   functions), via `--async200-blocking-calls='pat->replacement,...'`.
+//! - The spot-platform "type escape hatch" rules, via
+//!   `--type-hatches=no-any,no-getattr,no-object`:
+//!     no-getattr : bare `getattr()` / `hasattr()` calls
+//!     no-any     : `Any` anywhere inside an annotation
+//!     no-object  : `object` anywhere inside an annotation
+//!   suppressed per-site with `# lint-ignore: no-any,no-getattr` comments
+//!   anywhere in the enclosing statement/signature span.
+//!
+//! ASYNC200 semantics match flake8-async: inside `async def` bodies (nested
+//! `def` and `lambda` reset the context), every call that is not directly
+//! awaited has `ast.unparse(node.func)` fnmatch-ed against the patterns.
 
 use rayon::prelude::*;
 use ruff_python_ast::visitor::{walk_expr, Visitor};
-use ruff_python_ast::{Expr, ExprCall, Stmt};
+use ruff_python_ast::{Expr, ExprCall, Stmt, StmtAnnAssign, StmtFunctionDef};
 use ruff_text_size::{Ranged, TextSize};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-
-struct Diagnostic {
-    offset: TextSize,
-    pattern_idx: usize,
-}
 
 /// fnmatch-style glob: `*` matches any run of characters (including `.`),
 /// `?` matches one byte. Anchored at both ends, like Python's fnmatch.
@@ -68,22 +72,112 @@ fn unparse(expr: &Expr, out: &mut String) {
     }
 }
 
+const HATCH_CODES: [&str; 3] = ["no-any", "no-getattr", "no-object"];
+
+#[derive(Default, Clone, Copy)]
+struct Hatches {
+    no_any: bool,
+    no_getattr: bool,
+    no_object: bool,
+}
+
+enum Diag {
+    Async200 {
+        offset: TextSize,
+        pattern_idx: usize,
+    },
+    Hatch {
+        code: &'static str,
+        message: String,
+        /// Offset of the offending node (column is computed on its own line).
+        offset: TextSize,
+        /// Span whose lines are searched for `# lint-ignore:` and whose first
+        /// line is the reported line (enclosing statement / signature).
+        span: (TextSize, TextSize),
+    },
+}
+
+/// Names that identify the `typing` module when used as an attribute base
+/// (`t`/`tp` cover `import typing as t`).
+fn is_typing_any(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "Any",
+        Expr::Attribute(a) => {
+            a.attr.as_str() == "Any"
+                && matches!(&*a.value, Expr::Name(base)
+                    if matches!(base.id.as_str(), "typing" | "typing_extensions" | "t" | "tp"))
+        }
+        _ => false,
+    }
+}
+
+struct AnnScan<'a> {
+    hatches: Hatches,
+    span: (TextSize, TextSize),
+    diags: &'a mut Vec<Diag>,
+}
+
+impl<'a> Visitor<'a> for AnnScan<'_> {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if self.hatches.no_any && is_typing_any(expr) {
+            self.diags.push(Diag::Hatch {
+                code: "no-any",
+                message: "`Any` in annotation".to_string(),
+                offset: expr.range().start(),
+                span: self.span,
+            });
+        }
+        if self.hatches.no_object
+            && matches!(expr, Expr::Name(n) if n.id.as_str() == "object")
+        {
+            self.diags.push(Diag::Hatch {
+                code: "no-object",
+                message: "`object` in annotation".to_string(),
+                offset: expr.range().start(),
+                span: self.span,
+            });
+        }
+        walk_expr(self, expr);
+    }
+}
+
 struct Checker<'a> {
     patterns: &'a [(String, String)],
+    hatches: Hatches,
     in_async: bool,
-    diagnostics: Vec<Diagnostic>,
+    /// (anchor for the reported line, end) of the nearest enclosing statement.
+    stmt_span: Option<(TextSize, TextSize)>,
+    diags: Vec<Diag>,
 }
 
 impl Checker<'_> {
-    fn check_call(&mut self, call: &ExprCall) {
-        if !self.in_async {
+    /// `check_async200` is false for directly-awaited calls, which flake8-async
+    /// exempts; no-getattr applies to them regardless (the Python tool flags
+    /// every `getattr`/`hasattr` call).
+    fn check_call(&mut self, call: &ExprCall, check_async200: bool) {
+        if self.hatches.no_getattr {
+            if let Expr::Name(n) = &*call.func {
+                if matches!(n.id.as_str(), "getattr" | "hasattr") {
+                    let span = self
+                        .stmt_span
+                        .unwrap_or((call.range().start(), call.range().end()));
+                    self.diags.push(Diag::Hatch {
+                        code: "no-getattr",
+                        message: format!("`{}(...)` is banned", n.id.as_str()),
+                        offset: call.range().start(),
+                        span,
+                    });
+                }
+            }
+        }
+        if !check_async200 || !self.in_async || self.patterns.is_empty() {
             return;
         }
         let mut name = String::new();
         unparse(&call.func, &mut name);
         for (i, (pat, _)) in self.patterns.iter().enumerate() {
             if glob_match(pat.as_bytes(), name.as_bytes()) {
-                self.diagnostics.push(Diagnostic {
+                self.diags.push(Diag::Async200 {
                     offset: call.range().start(),
                     pattern_idx: i,
                 });
@@ -92,7 +186,7 @@ impl Checker<'_> {
         }
     }
 
-    /// Visit a call's children without checking the call itself (for `await f()`).
+    /// Visit a call's children without re-visiting the call node itself.
     fn walk_call_children(&mut self, call: &ExprCall) {
         self.visit_expr(&call.func);
         for arg in &*call.arguments.args {
@@ -102,16 +196,66 @@ impl Checker<'_> {
             self.visit_expr(&kw.value);
         }
     }
+
+    fn scan_annotation(&mut self, ann: &Expr, span: (TextSize, TextSize)) {
+        if !(self.hatches.no_any || self.hatches.no_object) {
+            return;
+        }
+        AnnScan {
+            hatches: self.hatches,
+            span,
+            diags: &mut self.diags,
+        }
+        .visit_expr(ann);
+    }
+
+    /// Signature span: `def` line through the line of the first body statement
+    /// (mirrors the Python tool, wide enough that line-wrapping can't orphan
+    /// the lint-ignore comment).
+    fn function_hatches(&mut self, f: &StmtFunctionDef) {
+        let start = f.name.range().start();
+        let end = f
+            .body
+            .first()
+            .map(|s| s.range().start())
+            .unwrap_or_else(|| f.range().end());
+        let span = (start, end);
+        for param in f.parameters.iter() {
+            if let Some(ann) = param.annotation() {
+                self.scan_annotation(ann, span);
+            }
+        }
+        if let Some(returns) = &f.returns {
+            self.scan_annotation(returns, span);
+        }
+    }
+
+    fn ann_assign_hatches(&mut self, a: &StmtAnnAssign) {
+        self.scan_annotation(&a.annotation, (a.range().start(), a.range().end()));
+    }
 }
 
 impl<'a> Visitor<'a> for Checker<'_> {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        // Anchor the reported line at the `def`/`class` keyword line, like
+        // Python's stmt.lineno (ruff's node range starts at the decorators).
+        let anchor = match stmt {
+            Stmt::FunctionDef(f) => f.name.range().start(),
+            Stmt::ClassDef(c) => c.name.range().start(),
+            _ => stmt.range().start(),
+        };
+        let prev = self.stmt_span.replace((anchor, stmt.range().end()));
         match stmt {
             Stmt::FunctionDef(f) => {
-                let prev = self.in_async;
+                self.function_hatches(f);
+                let prev_async = self.in_async;
                 self.in_async = f.is_async;
                 ruff_python_ast::visitor::walk_stmt(self, stmt);
-                self.in_async = prev;
+                self.in_async = prev_async;
+            }
+            Stmt::AnnAssign(a) => {
+                self.ann_assign_hatches(a);
+                ruff_python_ast::visitor::walk_stmt(self, stmt);
             }
             // ruff's walk_stmt visits each elif test twice (directly and via
             // walk_elif_else_clause), which would double-report; walk If ourselves.
@@ -120,13 +264,21 @@ impl<'a> Visitor<'a> for Checker<'_> {
                 self.visit_body(&if_stmt.body);
                 for clause in &if_stmt.elif_else_clauses {
                     if let Some(test) = &clause.test {
+                        // Python's AST nests `elif` as an inner If statement, so
+                        // its span runs from the `elif` keyword to the end of the
+                        // remaining chain; mirror that for calls in elif tests.
+                        let prev_span = self
+                            .stmt_span
+                            .replace((clause.range().start(), if_stmt.range().end()));
                         self.visit_expr(test);
+                        self.stmt_span = prev_span;
                     }
                     self.visit_body(&clause.body);
                 }
             }
             _ => ruff_python_ast::visitor::walk_stmt(self, stmt),
         }
+        self.stmt_span = prev;
     }
 
     fn visit_expr(&mut self, expr: &'a Expr) {
@@ -139,13 +291,14 @@ impl<'a> Visitor<'a> for Checker<'_> {
             }
             Expr::Await(aw) => {
                 if let Expr::Call(call) = &*aw.value {
+                    self.check_call(call, false);
                     self.walk_call_children(call);
                 } else {
                     walk_expr(self, expr);
                 }
             }
             Expr::Call(call) => {
-                self.check_call(call);
+                self.check_call(call, true);
                 walk_expr(self, expr);
             }
             _ => walk_expr(self, expr),
@@ -183,7 +336,67 @@ fn noqa_suppresses(line: &str) -> bool {
     false
 }
 
-fn check_file(path: &Path, patterns: &[(String, String)]) -> Vec<(PathBuf, usize, usize, usize)> {
+/// Is `code` listed in a `# lint-ignore: a,b` comment on this line?
+fn lint_ignored(line: &str, code: &str) -> bool {
+    let bytes = line.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] != b'#' {
+            continue;
+        }
+        let rest = line[i + 1..].trim_start();
+        if let Some(after) = rest.strip_prefix("lint-ignore:") {
+            let list: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ',' | '-') || c.is_whitespace())
+                .collect();
+            if list.split(',').any(|c| c.trim() == code) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+struct LineIndex {
+    starts: Vec<usize>,
+    len: usize,
+}
+
+impl LineIndex {
+    fn new(source: &str) -> Self {
+        let mut starts = vec![0usize];
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                starts.push(i + 1);
+            }
+        }
+        Self {
+            starts,
+            len: source.len(),
+        }
+    }
+
+    /// 1-based line number containing byte offset `off`.
+    fn line_of(&self, off: usize) -> usize {
+        self.starts.partition_point(|&s| s <= off)
+    }
+
+    fn line_text<'s>(&self, source: &'s str, line: usize) -> &'s str {
+        let start = self.starts[line - 1];
+        let end = self.starts.get(line).map_or(self.len, |&e| e - 1);
+        &source[start..end]
+    }
+
+    fn col_of(&self, off: usize) -> usize {
+        off - self.starts[self.line_of(off) - 1] + 1
+    }
+}
+
+fn check_file(
+    path: &Path,
+    patterns: &[(String, String)],
+    hatches: Hatches,
+) -> Vec<(PathBuf, usize, usize, String)> {
     let Ok(source) = std::fs::read_to_string(path) else {
         eprintln!("warning: could not read {}", path.display());
         return Vec::new();
@@ -197,35 +410,65 @@ fn check_file(path: &Path, patterns: &[(String, String)]) -> Vec<(PathBuf, usize
     };
     let mut checker = Checker {
         patterns,
+        hatches,
         in_async: false,
-        diagnostics: Vec::new(),
+        stmt_span: None,
+        diags: Vec::new(),
     };
     for stmt in &parsed.syntax().body {
         checker.visit_stmt(stmt);
     }
-    if checker.diagnostics.is_empty() {
+    if checker.diags.is_empty() {
         return Vec::new();
     }
 
-    let mut line_starts = vec![0usize];
-    for (i, b) in source.bytes().enumerate() {
-        if b == b'\n' {
-            line_starts.push(i + 1);
-        }
-    }
+    let index = LineIndex::new(&source);
+    let n_lines = index.starts.len();
     checker
-        .diagnostics
+        .diags
         .into_iter()
-        .filter_map(|d| {
-            let off = usize::from(d.offset);
-            let line = line_starts.partition_point(|&s| s <= off);
-            let start = line_starts[line - 1];
-            let end = line_starts.get(line).map_or(source.len(), |&e| e - 1);
-            let line_text = &source[start..end];
-            if noqa_suppresses(line_text) {
-                None
-            } else {
-                Some((path.to_path_buf(), line, off - start + 1, d.pattern_idx))
+        .filter_map(|d| match d {
+            Diag::Async200 {
+                offset,
+                pattern_idx,
+            } => {
+                let off = usize::from(offset);
+                let line = index.line_of(off);
+                if noqa_suppresses(index.line_text(&source, line)) {
+                    return None;
+                }
+                let (pat, repl) = &patterns[pattern_idx];
+                Some((
+                    path.to_path_buf(),
+                    line,
+                    index.col_of(off),
+                    format!(
+                        "ASYNC200 User-configured blocking sync call {pat} in async function, consider replacing with {repl}."
+                    ),
+                ))
+            }
+            Diag::Hatch {
+                code,
+                message,
+                offset,
+                span,
+            } => {
+                let start_line = index.line_of(usize::from(span.0));
+                let end_line = index.line_of(usize::from(span.1)).min(n_lines);
+                for line in start_line..=end_line {
+                    if lint_ignored(index.line_text(&source, line), code) {
+                        return None;
+                    }
+                }
+                Some((
+                    path.to_path_buf(),
+                    start_line,
+                    index.col_of(usize::from(offset)),
+                    format!(
+                        "{} {message} — rewrite or add `# lint-ignore: {code}` to this line.",
+                        code.to_uppercase()
+                    ),
+                ))
             }
         })
         .collect()
@@ -275,6 +518,7 @@ fn main() -> ExitCode {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut excludes: Vec<String> = Vec::new();
     let mut patterns: Vec<(String, String)> = Vec::new();
+    let mut hatches = Hatches::default();
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -292,6 +536,22 @@ fn main() -> ExitCode {
                     Some((k, r)) => patterns.push((k.trim().to_string(), r.trim().to_string())),
                     None => {
                         eprintln!("error: missing '->' in blocking-calls entry {entry:?}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+        } else if arg == "--type-hatches" || arg.starts_with("--type-hatches=") {
+            let v = take_value(&arg, &mut args);
+            for code in v.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                match code {
+                    "no-any" => hatches.no_any = true,
+                    "no-getattr" => hatches.no_getattr = true,
+                    "no-object" => hatches.no_object = true,
+                    _ => {
+                        eprintln!(
+                            "error: unknown type-hatch rule {code:?} (valid: {})",
+                            HATCH_CODES.join(", ")
+                        );
                         return ExitCode::from(2);
                     }
                 }
@@ -315,18 +575,14 @@ fn main() -> ExitCode {
         collect_files(p, &excludes, &mut files);
     }
 
-    let mut results: Vec<(PathBuf, usize, usize, usize)> = files
+    let mut results: Vec<(PathBuf, usize, usize, String)> = files
         .par_iter()
-        .flat_map_iter(|f| check_file(f, &patterns))
+        .flat_map_iter(|f| check_file(f, &patterns, hatches))
         .collect();
     results.sort();
 
-    for (path, line, col, idx) in &results {
-        let (pat, repl) = &patterns[*idx];
-        println!(
-            "{}:{line}:{col}: ASYNC200 User-configured blocking sync call {pat} in async function, consider replacing with {repl}.",
-            path.display()
-        );
+    for (path, line, col, msg) in &results {
+        println!("{}:{line}:{col}: {msg}", path.display());
     }
     if results.is_empty() {
         ExitCode::SUCCESS
