@@ -1,0 +1,6 @@
+tests/transitive/a.py:15:5: ASYNC200T blocking sync call stripe.* reachable from async function via helper -> leaf (tests/transitive/a.py:7:5)
+tests/transitive/a.py:19:5: ASYNC200 User-configured blocking sync call stripe.* in async function, consider replacing with alt().
+tests/transitive/a.py:27:9: ASYNC200T blocking sync call stripe.* reachable from async function via C.m (tests/transitive/a.py:24:9)
+tests/transitive/a.py:48:5: ASYNC200T blocking sync call stripe.* reachable from async function via r1 -> r2 (tests/transitive/a.py:44:5)
+tests/transitive/a.py:52:5: ASYNC200T blocking sync call stripe.* reachable from async function via helper -> leaf (tests/transitive/a.py:7:5)
+tests/transitive/c.py:5:5: ASYNC200T blocking sync call stripe.* reachable from async function via unique_helper (tests/transitive/b.py:10:5)

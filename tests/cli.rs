@@ -78,3 +78,23 @@ fn unknown_hatch_rule_is_an_error() {
     let out = run(&["--type-hatches=no-such-rule", "tests/hatches.py"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Covers: multi-hop chains, same-class method resolution, cross-file
+/// globally-unique resolution, ambiguity refusal, cycles, callables passed
+/// to executors (not calls), async-to-async boundaries, and noqa.
+#[test]
+fn transitive_chains() {
+    let out = run(&[
+        "--async200-blocking-calls=stripe.*->alt()",
+        "--async200-transitive",
+        "tests/transitive",
+    ]);
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), expected("transitive.expected"));
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn transitive_requires_patterns() {
+    let out = run(&["--async200-transitive", "tests/transitive"]);
+    assert_eq!(out.status.code(), Some(2));
+}

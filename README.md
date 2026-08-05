@@ -13,6 +13,22 @@ ty-async src-dir another-dir \
   --async200-blocking-calls='stripe.*->alt(),*.load_data->(),fcntl.flock->()'
 ```
 
+## Transitive mode
+
+`--async200-transitive` (with the same patterns flag) additionally builds a
+name-based call graph and reports call sites in async functions that reach a
+blocking call *through* sync helpers, with the chain as evidence:
+
+```
+app.py:161:18: ASYNC200T blocking sync call markdown.markdown reachable from async function via markdown_to_slack_blocks (client.py:176:12)
+```
+
+Calls are resolved by name only (same class → same file → globally unique;
+ambiguous names are skipped, not guessed). Callables merely passed to
+`asyncio.to_thread` / `run_in_executor` are not calls, so executor wrappers
+are naturally exempt. Dynamic dispatch and framework callbacks are out of
+scope. Suppress a site with `# noqa` / `# noqa: ASYNC200` on its line.
+
 ## Type escape hatches
 
 `--type-hatches=no-any,no-getattr,no-object` enables three extra rules
