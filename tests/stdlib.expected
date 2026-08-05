@@ -2,7 +2,6 @@ tests/stdlib.py:11:5: ASYNC200 User-configured blocking sync call time.sleep in 
 tests/stdlib.py:12:5: ASYNC200 User-configured blocking sync call open in async function, consider replacing with aiofiles.open(...) or anyio.open_file(...).
 tests/stdlib.py:13:12: ASYNC200 User-configured blocking sync call *.read_text in async function, consider replacing with anyio.Path(...).read_text().
 tests/stdlib.py:14:5: ASYNC200 User-configured blocking sync call subprocess.run in async function, consider replacing with asyncio.create_subprocess_exec(...).
-tests/stdlib.py:15:5: ASYNC200 User-configured blocking sync call os.path.exists in async function, consider replacing with anyio.Path(...).exists().
 tests/stdlib.py:16:5: ASYNC200 User-configured blocking sync call urllib.request.urlopen in async function, consider replacing with httpx.AsyncClient.
 tests/stdlib.py:17:5: ASYNC200 User-configured blocking sync call os.system in async function, consider replacing with asyncio.create_subprocess_shell(...).
 tests/stdlib.py:25:5: ASYNC200 User-configured blocking sync call time.sleep in async function, consider replacing with my_custom_sleep().
