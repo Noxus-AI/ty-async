@@ -74,6 +74,108 @@ fn unparse(expr: &Expr, out: &mut String) {
 
 const HATCH_CODES: [&str; 3] = ["no-any", "no-getattr", "no-object"];
 
+/// Curated blocking-stdlib preset (`--async200-stdlib`), mirroring the calls
+/// flake8-async's ASYNC21x/22x/23x/24x/25x rules target plus a few high-signal
+/// extras (pathlib I/O methods, sync network clients, sqlite3, archives).
+/// Deliberately omits generic method names (`.read`, `.recv`, `.acquire`,
+/// `.wait`, `.get`) whose false-positive rate would swamp the signal.
+const STDLIB_BLOCKING: &[(&str, &str)] = &[
+    // sleep / console
+    ("time.sleep", "await asyncio.sleep(...)"),
+    ("input", "asyncio.to_thread(input)"),
+    ("getpass.getpass", "asyncio.to_thread(...)"),
+    // file opening
+    ("open", "aiofiles.open(...) or anyio.open_file(...)"),
+    ("io.open", "aiofiles.open(...) or anyio.open_file(...)"),
+    ("io.open_code", "aiofiles.open(...) or anyio.open_file(...)"),
+    ("os.fdopen", "aiofiles.open(...) or anyio.open_file(...)"),
+    // pathlib I/O (sync Path methods; awaited anyio.Path calls are exempt)
+    ("*.read_text", "anyio.Path(...).read_text()"),
+    ("*.write_text", "anyio.Path(...).write_text()"),
+    ("*.read_bytes", "anyio.Path(...).read_bytes()"),
+    ("*.write_bytes", "anyio.Path(...).write_bytes()"),
+    // filesystem
+    ("os.listdir", "asyncio.to_thread(...)"),
+    ("os.scandir", "asyncio.to_thread(...)"),
+    ("os.walk", "asyncio.to_thread(...)"),
+    ("os.stat", "asyncio.to_thread(...)"),
+    ("os.remove", "asyncio.to_thread(...)"),
+    ("os.unlink", "asyncio.to_thread(...)"),
+    ("os.rename", "asyncio.to_thread(...)"),
+    ("os.replace", "asyncio.to_thread(...)"),
+    ("os.mkdir", "asyncio.to_thread(...)"),
+    ("os.makedirs", "asyncio.to_thread(...)"),
+    ("os.rmdir", "asyncio.to_thread(...)"),
+    ("os.removedirs", "asyncio.to_thread(...)"),
+    ("shutil.copy", "asyncio.to_thread(...)"),
+    ("shutil.copy2", "asyncio.to_thread(...)"),
+    ("shutil.copyfile", "asyncio.to_thread(...)"),
+    ("shutil.copytree", "asyncio.to_thread(...)"),
+    ("shutil.move", "asyncio.to_thread(...)"),
+    ("shutil.rmtree", "asyncio.to_thread(...)"),
+    ("tempfile.NamedTemporaryFile", "asyncio.to_thread(...)"),
+    ("tempfile.TemporaryFile", "asyncio.to_thread(...)"),
+    ("tempfile.mkstemp", "asyncio.to_thread(...)"),
+    ("tempfile.mkdtemp", "asyncio.to_thread(...)"),
+    // os.path disk probes (flake8-async ASYNC240 set)
+    ("os.path.exists", "anyio.Path(...).exists()"),
+    ("os.path.isfile", "anyio.Path(...).is_file()"),
+    ("os.path.isdir", "anyio.Path(...).is_dir()"),
+    ("os.path.islink", "asyncio.to_thread(...)"),
+    ("os.path.lexists", "asyncio.to_thread(...)"),
+    ("os.path.ismount", "asyncio.to_thread(...)"),
+    ("os.path.realpath", "asyncio.to_thread(...)"),
+    ("os.path.normpath", "asyncio.to_thread(...)"),
+    ("os.path.relpath", "asyncio.to_thread(...)"),
+    ("os.path.getsize", "asyncio.to_thread(...)"),
+    ("os.path.getatime", "asyncio.to_thread(...)"),
+    ("os.path.getctime", "asyncio.to_thread(...)"),
+    ("os.path.getmtime", "asyncio.to_thread(...)"),
+    ("os.path.samefile", "asyncio.to_thread(...)"),
+    // subprocess / process control
+    ("subprocess.run", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.call", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.check_call", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.check_output", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.getoutput", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.getstatusoutput", "asyncio.create_subprocess_exec(...)"),
+    ("subprocess.Popen", "asyncio.create_subprocess_exec(...)"),
+    ("os.system", "asyncio.create_subprocess_shell(...)"),
+    ("os.popen", "asyncio.create_subprocess_shell(...)"),
+    ("os.spawn*", "asyncio.create_subprocess_exec(...)"),
+    ("os.posix_spawn", "asyncio.create_subprocess_exec(...)"),
+    ("os.posix_spawnp", "asyncio.create_subprocess_exec(...)"),
+    ("os.wait", "asyncio child process APIs"),
+    ("os.waitpid", "asyncio child process APIs"),
+    ("os.waitid", "asyncio child process APIs"),
+    ("os.wait3", "asyncio child process APIs"),
+    ("os.wait4", "asyncio child process APIs"),
+    // network
+    ("urllib.request.urlopen", "httpx.AsyncClient"),
+    ("socket.getaddrinfo", "loop.getaddrinfo(...)"),
+    ("socket.gethostbyname", "loop.getaddrinfo(...)"),
+    ("socket.gethostbyaddr", "loop.getaddrinfo(...)"),
+    ("socket.getfqdn", "loop.getaddrinfo(...)"),
+    ("socket.create_connection", "asyncio.open_connection(...)"),
+    ("smtplib.SMTP", "aiosmtplib"),
+    ("smtplib.SMTP_SSL", "aiosmtplib"),
+    ("ftplib.FTP", "aioftp"),
+    ("poplib.POP3", "asyncio.to_thread(...)"),
+    ("imaplib.IMAP4", "asyncio.to_thread(...)"),
+    ("http.client.HTTPConnection", "httpx.AsyncClient"),
+    ("http.client.HTTPSConnection", "httpx.AsyncClient"),
+    // database
+    ("sqlite3.connect", "aiosqlite.connect(...)"),
+    // archives / compression (CPU + disk)
+    ("gzip.open", "asyncio.to_thread(...)"),
+    ("bz2.open", "asyncio.to_thread(...)"),
+    ("lzma.open", "asyncio.to_thread(...)"),
+    ("zipfile.ZipFile", "asyncio.to_thread(...)"),
+    ("tarfile.open", "asyncio.to_thread(...)"),
+    ("shutil.make_archive", "asyncio.to_thread(...)"),
+    ("shutil.unpack_archive", "asyncio.to_thread(...)"),
+];
+
 // ---- transitive ASYNC200 (--async200-transitive) ----
 //
 // Call-graph mode: a blocking call inside a plain sync function is reported at
@@ -788,6 +890,7 @@ fn main() -> ExitCode {
     let mut patterns: Vec<(String, String)> = Vec::new();
     let mut hatches = Hatches::default();
     let mut transitive = false;
+    let mut stdlib_preset = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -827,6 +930,8 @@ fn main() -> ExitCode {
             }
         } else if arg == "--async200-transitive" {
             transitive = true;
+        } else if arg == "--async200-stdlib" {
+            stdlib_preset = true;
         } else if arg == "--ignore" || arg.starts_with("--ignore=") {
             take_value(&arg, &mut args); // only ASYNC200 is implemented
         } else if arg == "--asyncio" {
@@ -837,8 +942,18 @@ fn main() -> ExitCode {
             paths.push(PathBuf::from(arg));
         }
     }
+    if stdlib_preset {
+        // appended after user patterns so user-supplied entries win on overlap
+        patterns.extend(
+            STDLIB_BLOCKING
+                .iter()
+                .map(|(p, r)| (p.to_string(), r.to_string())),
+        );
+    }
     if transitive && patterns.is_empty() {
-        eprintln!("error: --async200-transitive requires --async200-blocking-calls");
+        eprintln!(
+            "error: --async200-transitive requires --async200-blocking-calls or --async200-stdlib"
+        );
         return ExitCode::from(2);
     }
     if paths.is_empty() {

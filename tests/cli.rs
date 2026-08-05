@@ -98,3 +98,23 @@ fn transitive_requires_patterns() {
     let out = run(&["--async200-transitive", "tests/transitive"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Covers: preset hits (sleep, open, pathlib, subprocess, os.path, urllib,
+/// os.system), awaited-wrapper and to_thread exemptions, noqa, sync context,
+/// and user patterns overriding the preset for the same call.
+#[test]
+fn stdlib_preset() {
+    let out = run(&[
+        "--async200-stdlib",
+        "--async200-blocking-calls=time.sleep->my_custom_sleep()",
+        "tests/stdlib.py",
+    ]);
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), expected("stdlib.expected"));
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn stdlib_preset_satisfies_transitive() {
+    let out = run(&["--async200-stdlib", "--async200-transitive", "tests/stdlib.py"]);
+    assert_eq!(out.status.code(), Some(1), "stdlib preset alone enables transitive");
+}

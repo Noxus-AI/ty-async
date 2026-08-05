@@ -13,6 +13,21 @@ ty-async src-dir another-dir \
   --async200-blocking-calls='stripe.*->alt(),*.load_data->(),fcntl.flock->()'
 ```
 
+## Stdlib preset
+
+There is no official CPython list of "don't call this in the event loop",
+but flake8-async's ASYNC21x–25x rules are the de-facto one. `--async200-stdlib`
+appends a curated preset mirroring them plus high-signal extras: `time.sleep`,
+`input`, `open`/`io.open`/`os.fdopen`, pathlib `read_text`/`write_bytes`/…,
+`os` and `shutil` filesystem calls, the `os.path` disk probes, `subprocess.*`
+and `os.system`/`os.spawn*`/`os.wait*`, `urllib.request.urlopen`, `socket`
+DNS lookups, `smtplib`/`ftplib`/`http.client`, `sqlite3.connect`, and
+archive/compression helpers. Generic method names (`.read`, `.recv`,
+`.acquire`, `.wait`, `.get`) are deliberately omitted — too many false
+positives. User patterns win on overlap, awaited calls stay exempt (so
+`aiofiles`/`anyio` wrappers never fire), and it composes with
+`--async200-transitive`.
+
 ## Transitive mode
 
 `--async200-transitive` (with the same patterns flag) additionally builds a
